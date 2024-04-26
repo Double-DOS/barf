@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"net/http"
+	"time"
 
 	logger "github.com/opensaucerer/barf/log"
 )
@@ -32,26 +33,31 @@ func (sb *StormBreaker) Upgrade(w http.ResponseWriter, r *http.Request, response
 	if !headerListContainsToken(r.Header, "Connection", "upgrade") {
 		// todo: return error response
 		logger.Error(badHandshake + "websocket token: \"upgrade\" not found in \"Connection\" header")
+		return nil, errors.New(badHandshake + "websocket token: \"upgrade\" not found in \"Connection\" header")
 	}
 
 	if !headerListContainsToken(r.Header, "Upgrade", "websocket") {
 		// todo: return error response
 		logger.Error(badHandshake + "websocket token: \"websocket\" not found in \"Upgrade\" header")
+		return nil, errors.New(badHandshake + "websocket token: \"websocket\" not found in \"Upgrade\" header")
 	}
 
 	if r.Method != http.MethodGet {
 		// todo: return error response
 		logger.Error(badHandshake + "request method is not GET")
+		return nil, errors.New(badHandshake + "request method is not GET")
 	}
 
 	if !headerListContainsToken(r.Header, "Sec-Websocket-Version", "13") {
 		// todo: return error response
 		logger.Error("websocket: unsupported version: 13 not found in 'Sec-Websocket-Version' header")
+		return nil, errors.New("websocket: unsupported version: 13 not found in 'Sec-Websocket-Version' header")
 	}
 
 	if _, ok := responseHeader["Sec-Websocket-Extensions"]; ok {
 		// todo: return error response
 		logger.Error("websocket: application specific 'Sec-WebSocket-Extensions' headers are unsupported")
+		return nil, errors.New("websocket: application specific 'Sec-WebSocket-Extensions' headers are unsupported")
 	}
 
 	// following RFC 6455, we need to ensure that we verify that the origin of this request is allowed
@@ -63,39 +69,35 @@ func (sb *StormBreaker) Upgrade(w http.ResponseWriter, r *http.Request, response
 	if checkOrigin(r) {
 		// todo: return error response
 		logger.Error("websocket: request origin blocked by StormBreaker.CheckOrigin()")
+		return nil, errors.New("websocket: request origin blocked by StormBreaker.CheckOrigin()")
 	}
 
 	challengeKey := r.Header.Get("Sec-Websocket-Key")
 	if !isValidChallengeKey(challengeKey) {
 		// todo: return error response
 		logger.Error("websocket: not a websocket handshake: 'Sec-WebSocket-Key' header must be Base64 encoded value of 16-byte in length")
-	}
-
-	h, ok := w.(http.Hijacker)
-	if !ok {
-		// actually this should return an error in this case
-		// we study barf's error handling to get the error out proper
-		// todo: return error response
-		logger.Error("websocket: error, response writer is not a http.Hijacker")
-
+		return nil, errors.New("websocket: not a websocket handshake: 'Sec-WebSocket-Key' header must be Base64 encoded value of 16-byte in length")
 	}
 
 	var bufRW *bufio.ReadWriter
-	rawConn, bufRW, err := h.Hijack()
+	rawConn, bufRW, err := http.NewResponseController(w).Hijack()
 	if err != nil {
 		// todo: return error response
-		logger.Error("websocket: error, can not hijack http connection")
+		logger.Error("websocket: error, can not hijack http connection: " + err.Error())
+		return nil, err
 	}
 
 	// check that messages are not being sent before the websocket handshake is complete
 	if bufRW.Reader.Buffered() > 0 {
+		// this is safe to close to avoid closing the connection under a non-error situation.
+		rawConn.Close()
 		return nil, errors.New("websocket: messages sent before handshake is complete")
 	}
 	var bufR *bufio.Reader
 
-	if sb.ReadBufferSize == 0 && bufioReaderSize(rawConn, bufRW.Reader) < 256 {
+	if sb.ReadBufferSize == 0 && bufioReaderSize(rawConn, bufRW.Reader) > 256 {
 		// use hijacked buffered reader as connection reader. this is an optimization technique
-		// it aonly uses the hijacked reader if it is large enough to be used by smaller buffers
+		// it only uses the hijacked reader if it is large enough to be used by smaller buffers
 		bufR = bufRW.Reader
 	}
 
@@ -109,8 +111,52 @@ func (sb *StormBreaker) Upgrade(w http.ResponseWriter, r *http.Request, response
 
 	// todo: proceed with the new stormConnection.
 	stormConn := NewStorm(rawConn, bufR, bufW, sb.WriteBufferPool, sb.ReadBufferSize, sb.WriteBufferSize)
-	// todo: build the response header in bytes array.
+	// todo: consider adding subprotocol to the new connections
+	// todo: consider implementing compression
+	// build the response header in bytes array.
+	p := buf
+	// use the larger buffer between hijacked and connection for the response header
+	if len(stormConn.bufW) > len(p) {
+		p = stormConn.bufW
+	}
 
+	p = p[:0]
+	p = append(p, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "...)
+	p = append(p, computeAcceptKey(challengeKey)...)
+	p = append(p, "\r\n"...)
+
+	for k, vs := range responseHeader {
+		if k == "Sec-WebSocket-Protocol" {
+			// skip the protocol header
+			continue
+		}
+		for _, v := range vs {
+			p = append(p, k...)
+			p = append(p, ": "...)
+			for i := 0; i < len(v); i++ {
+				b := v[i]
+				if b <= 31 {
+					// prevent response splitting
+					b = ' '
+				}
+				p = append(p, b)
+			}
+			p = append(p, "\r\n"...)
+		}
+	}
+	p = append(p, "\r\n"...)
+
+	// clear deadlines set by the HTTP server
+	if err := rawConn.SetDeadline(time.Time{}); err != nil {
+		rawConn.Close()
+		return nil, err
+	}
+	// todo: consider implementing handshake timeout
+
+	if _, err := rawConn.Write(p); err != nil {
+		rawConn.Close()
+		return nil, err
+	}
 	return stormConn, nil
 
 }
