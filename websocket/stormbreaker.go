@@ -109,8 +109,8 @@ func (sb *StormBreaker) Upgrade(w http.ResponseWriter, r *http.Request, response
 		bufW = buf
 	}
 
-	// todo: proceed with the new stormConnection.
-	stormConn := NewStorm(rawConn, bufR, bufW, sb.WriteBufferPool, sb.ReadBufferSize, sb.WriteBufferSize)
+	// proceed with the new stormConnection.
+	stormConn := NewStorm(rawConn, true, bufR, bufW, sb.WriteBufferPool, sb.ReadBufferSize, sb.WriteBufferSize)
 	// todo: consider adding subprotocol to the new connections
 	// todo: consider implementing compression
 	// build the response header in bytes array.
@@ -147,10 +147,7 @@ func (sb *StormBreaker) Upgrade(w http.ResponseWriter, r *http.Request, response
 	p = append(p, "\r\n"...)
 
 	// clear deadlines set by the HTTP server
-	if err := rawConn.SetDeadline(time.Time{}); err != nil {
-		rawConn.Close()
-		return nil, err
-	}
+	rawConn.SetDeadline(time.Time{})
 	// todo: consider implementing handshake timeout
 
 	if _, err := rawConn.Write(p); err != nil {
@@ -158,5 +155,4 @@ func (sb *StormBreaker) Upgrade(w http.ResponseWriter, r *http.Request, response
 		return nil, err
 	}
 	return stormConn, nil
-
 }
