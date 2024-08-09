@@ -5,18 +5,17 @@ import (
 	"os"
 
 	"github.com/opensaucerer/barf"
-	"github.com/opensaucerer/barf/websocket"
 )
 
 func main() {
 	// store all the storm connections here.
-	allStorms := []*websocket.Storm{}
+	allStorms := []*barf.Storm{}
 
 	// barf tries to be as unobtrusive as possible, so your route handlers still
 	// inherit the standard http.ResponseWriter and *http.Request parameters
 	barf.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
 		barf.Logger().Info("reached endpoint")
-		stormBreaker := websocket.StormBreaker{}
+		stormBreaker := barf.StormBreaker{}
 		storm, err := stormBreaker.Upgrade(w, r, nil)
 		if err != nil {
 			barf.Logger().Error(err.Error())
